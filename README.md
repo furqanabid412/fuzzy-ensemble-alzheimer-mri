@@ -1,0 +1,192 @@
+# Fuzzy Integral Based Ensemble for Alzheimer's Disease Classification
+
+A deep-learning pipeline that classifies brain MRI scans as **AD** (Alzheimer's
+Disease) vs **CN** (Cognitively Normal). Four pre-trained CNN backbones are
+fine-tuned independently, and their softmax outputs are fused with a **Sugeno
+fuzzy integral** ensemble to produce a final prediction that is more robust than
+any single model.
+
+This was a term project for an *Intelligent Control Systems* course.
+
+## How it works
+
+1. **Transfer learning** — four ImageNet-pretrained backbones are fine-tuned on
+   the MRI dataset:
+   - VGG-11 (with batch norm)
+   - GoogLeNet
+   - SqueezeNet 1.1
+   - Wide ResNet-50-2
+2. **Per-model inference** — each trained model produces class probabilities
+   (softmax) on the validation/test set, which are written to CSV.
+3. **Fuzzy fusion** — the four probability sets are combined per class using the
+   generalized Sugeno fuzzy integral with a fixed fuzzy measure
+   (`[0.35, 0.35, 0.02, 0.28]`), and the class with the highest aggregated score
+   is chosen.
+4. **Evaluation** — accuracy, confusion matrix, class-wise accuracy, and
+   balanced accuracy are reported for each individual model and for the ensemble.
+
+## Background: why a fuzzy integral ensemble?
+
+**Ensembling** combines several models so their errors cancel out — where one
+backbone is uncertain or wrong, the others can outvote it, giving a final
+prediction that is usually more accurate and more stable than any single model.
+The naive way to combine models is simple averaging (all models weighted
+equally) or a weighted average (fixed per-model weights). Both treat each model's
+contribution as independent.
+
+A **fuzzy integral** goes further: instead of a plain weighted sum, it aggregates
+the models with respect to a **fuzzy measure** — a set of importance weights that
+lets the *confidence of the score itself* interact with the *trust placed in the
+model*. In other words, it rewards agreement between confident, trusted models
+rather than blindly summing everything.
+
+### The Sugeno fuzzy integral
+
+For a single class, collect the four models' predicted probabilities into a
+vector and sort them ascending. The **generalized Sugeno integral** used here is:
+
+```
+result = max_i ( min( X_sorted[i], measure[i] ) )
+```
+
+- `X_sorted[i]` — the i-th smallest model probability for that class.
+- `measure[i]` — the fuzzy measure (importance) at that rank.
+- `min(...)` caps each model's contribution by how much we trust it.
+- `max(...)` then picks the strongest surviving evidence across models.
+
+Intuitively: a class score only counts as strong if a sufficiently *trusted*
+subset of models is *jointly confident* about it. A high probability from a model
+we distrust gets clamped down; broad agreement among trusted models wins.
+
+This is computed independently for every class and every sample, producing an
+aggregated score matrix, and the class with the highest aggregated score is the
+final prediction (see `ensemble_sugeno()` in [`sugeno.py`](sugeno.py)).
+
+### The fuzzy measure
+
+The measure weights are set in `ensemble_sugeno()`:
+
+```python
+measure = np.array([0.35, 0.35, 0.02, 0.28])   # vgg11, googlenet, squeezenet, wideresnet
+```
+
+These reflect how much each backbone is trusted in the fusion — here VGG-11 and
+GoogLeNet carry the most weight, WideResNet a bit less, and SqueezeNet almost
+none. They were tuned by hand for this dataset; retune them if your per-model
+accuracies differ (the order matches `model_name` in [`main.py`](main.py)).
+
+> The code also includes `generate_cardinality()`, which can auto-generate a
+> measure from the number of models when you don't want to hand-pick weights.
+
+## Project structure
+
+| File | Purpose |
+|------|---------|
+| [`main.py`](main.py) | Entry point — trains/loads models, runs inference, and runs the Sugeno ensemble. |
+| [`dataloader.py`](dataloader.py) | Builds `ImageFolder` datasets/dataloaders with resize + normalization. |
+| [`trainer.py`](trainer.py) | Model definitions, the fine-tuning loop, and checkpoint saving. |
+| [`predictions.py`](predictions.py) | Runs each model on the test set and dumps probabilities to CSV. |
+| [`sugeno.py`](sugeno.py) | Sugeno fuzzy integral implementation, ensemble logic, and metrics. |
+| [`plots.py`](plots.py) | Saves loss/accuracy curves per model. |
+| [`get_image_stats.py`](get_image_stats.py) | Utility to compute dataset mean/std for normalization. |
+
+## Requirements
+
+- Python 3.8+
+- A CUDA-capable GPU is recommended (the code uses `.cuda()` during inference).
+
+Install the dependencies:
+
+```bash
+pip install torch torchvision numpy pandas scikit-learn matplotlib seaborn tqdm
+```
+
+## Dataset
+
+The pipeline expects an [`ImageFolder`](https://pytorch.org/vision/stable/generated/torchvision.datasets.ImageFolder.html)
+layout split into `train` and `val`, with one subfolder per class:
+
+```
+<data_dir>/
+├── train/
+│   ├── AD/
+│   └── CN/
+├── val/
+│   ├── AD/
+│   └── CN/
+└── models/          # created automatically for checkpoints, curves, CSVs
+    ├── vgg11/
+    ├── googlenet/
+    ├── squeezenet/
+    └── wideresnet/
+```
+
+Set the dataset location by editing `data_dir` in [`main.py`](main.py):
+
+```python
+data_dir = 'C:/Users/Furqan/Desktop/FuzzyIntegralBasedEnsemble/Alzdata'
+```
+
+> **Note:** the `mean`/`std` in the dataloader config are specific to this MRI
+> dataset. Recompute them for your own data with `python get_image_stats.py`.
+
+## Usage
+
+### 1. Compute dataset statistics (optional)
+
+```bash
+python get_image_stats.py
+```
+
+Copy the printed `mean`/`std` into the `dataset_stats` config in `main.py`.
+
+### 2. Train the four models
+
+In [`main.py`](main.py), the `get_predictions()` function drives training and
+inference. Set the mode to train, then call it:
+
+```python
+mode = 'train_model'   # inside get_predictions()
+get_predictions(mode='train_model')
+```
+
+Each model trains for 40 epochs (SGD, lr `1e-4`, momentum `0.99`, step LR
+scheduler). The best-validation checkpoint of each model is saved under
+`<data_dir>/models/<name>/` as both `.pt` (full model) and `.pth` (state dict),
+along with loss/accuracy plots.
+
+### 3. Generate per-model predictions
+
+Still via `get_predictions()`, inference on the validation set writes one CSV per
+model (`<data_dir>/<name>.csv`) containing the class probabilities plus the
+ground-truth label.
+
+To reuse already-trained checkpoints instead of retraining, set `mode =
+'load_model'`.
+
+### 4. Run the fuzzy ensemble
+
+By default `main.py` loads the saved CSVs and runs the Sugeno ensemble:
+
+```bash
+python main.py
+```
+
+This prints per-model metrics, then the ensemble accuracy, confusion matrix,
+class-wise accuracy, and balanced accuracy, and displays the confusion-matrix
+heatmaps.
+
+## Adjusting the ensemble
+
+- **Fuzzy measure** — tweak the `measure` weights in `ensemble_sugeno()`
+  ([`sugeno.py`](sugeno.py)) to change each model's influence. The order matches
+  `model_name = ['vgg11', 'googlenet', 'squeezenet', 'wideresnet']`.
+- **Backbones** — add or swap models in `get_model()` ([`trainer.py`](trainer.py))
+  and update `model_name` in `main.py` accordingly.
+
+## Notes
+
+- Model checkpoints, generated CSVs/plots, and the dataset are excluded from
+  version control via [`.gitignore`](.gitignore).
+- Inference in [`predictions.py`](predictions.py) assumes a GPU (`.cuda()`); adapt
+  it to `device` if running on CPU.

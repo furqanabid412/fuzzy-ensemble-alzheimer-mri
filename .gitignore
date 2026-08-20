@@ -1,0 +1,35 @@
+# JetBrains IDE
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+env/
+venv/
+.venv/
+ENV/
+
+# PyTorch model checkpoints
+*.pt
+*.pth
+
+# Data & generated outputs
+Alzdata/
+data/
+models/
+*.csv
+*.png
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
